@@ -948,6 +948,7 @@ function emptyStateHTML(emo, title, body) {
 }
 
 window.KanakkuRender = { charts, el, destroyChart, esc, toast, renderHome, entryRowHTML, emptyStateHTML };
+window.renderHome = renderHome;
 })();
 
 /* -------------------- HISTORY -------------------- */
