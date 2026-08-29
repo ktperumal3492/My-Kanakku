@@ -556,6 +556,32 @@ textarea.text-input { resize: none; min-height: 64px; }
 
 <div class="toast" id="toast"></div>
 
+<script>
+  // On-screen error catcher: shows a visible red banner with the real error
+  // message/file/line so problems can be diagnosed and screenshotted directly
+  // on a phone, without needing desktop dev tools.
+  (function () {
+    function showBanner(text) {
+      var el = document.getElementById('kanakkuErrorBanner');
+      if (!el) {
+        el = document.createElement('div');
+        el.id = 'kanakkuErrorBanner';
+        el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99999;' +
+          'background:#E8625D;color:#fff;font:12px/1.4 monospace;padding:10px 12px;' +
+          'max-height:40vh;overflow:auto;white-space:pre-wrap;word-break:break-word;';
+        document.body.appendChild(el);
+      }
+      el.textContent += (el.textContent ? '\n\n' : '') + text;
+    }
+    window.addEventListener('error', function (e) {
+      showBanner('JS Error: ' + e.message + '\nat ' + (e.filename || '?') + ':' + e.lineno + ':' + e.colno);
+    });
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e.reason;
+      showBanner('Unhandled promise rejection: ' + (r && r.stack ? r.stack : r));
+    });
+  })();
+</script>
 <script src="./app.js"></script>
 </body>
 </html>
