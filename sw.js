@@ -1,6 +1,6 @@
 // Kanakku service worker — app-shell caching for offline use.
 // Bump CACHE_VERSION whenever index.html changes so iOS Safari picks up the new shell.
-const CACHE_VERSION = 'kanakku-v4';
+const CACHE_VERSION = 'kanakku-v5';
 const APP_SHELL = [
   './index.html',
   './app.js',
