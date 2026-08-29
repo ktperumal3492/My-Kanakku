@@ -68,6 +68,43 @@ function getSubLabel(subId) { const e = getSub(subId); return e ? e.sub.label : 
 function getCatLabel(subId) { const e = getSub(subId); return e ? e.cat.label : 'Uncategorised'; }
 function isFixedSub(subId) { const e = getSub(subId); return e ? !!e.cat.fixed : false; }
 
+function rebuildSubIndex() {
+  Object.keys(SUB_INDEX).forEach(k => delete SUB_INDEX[k]);
+  CATEGORIES.forEach(cat => cat.subs.forEach(sub => { SUB_INDEX[sub.id] = { sub, cat }; }));
+}
+function slugify(label) {
+  return label.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'category';
+}
+// Adds a new sub-category under an existing top-level category (by catId) and
+// keeps SUB_INDEX in sync, so every existing helper (getSubLabel, getCatColor,
+// category grids, budgets, analytics breakdowns) picks it up with no other
+// code changes. Returns the new sub's id, or null if catId doesn't exist.
+function addCustomSub(catId, label) {
+  const cat = CATEGORIES.find(c => c.id === catId);
+  if (!cat || !label || !label.trim()) return null;
+  let id = 'custom_' + slugify(label);
+  let n = 1;
+  while (SUB_INDEX[id]) { id = 'custom_' + slugify(label) + '_' + (++n); }
+  cat.subs.push({ id, label: label.trim(), tags: [], merchants: [], custom: true });
+  rebuildSubIndex();
+  return id;
+}
+// Re-applies custom categories saved from a previous session (see kv key
+// 'customCategories' in init()) so they show up again on every load, since
+// CATEGORIES itself always starts back at just the 9 built-in groups.
+function restoreCustomSubs(saved) {
+  (saved || []).forEach(s => {
+    const cat = CATEGORIES.find(c => c.id === s.catId);
+    if (cat && !SUB_INDEX[s.id]) cat.subs.push({ id: s.id, label: s.label, tags: [], merchants: [], custom: true });
+  });
+  rebuildSubIndex();
+}
+function listCustomSubs() {
+  const out = [];
+  CATEGORIES.forEach(cat => cat.subs.forEach(sub => { if (sub.custom) out.push({ id: sub.id, catId: cat.id, label: sub.label }); }));
+  return out;
+}
+
 const KEYWORD_MAP = [
   [['swiggy'], 'food_delivery'], [['zomato'], 'food_delivery'],
   [['saravana bhavan','sangeetha','mess','tiffin','idli','dosa','hotel'], 'hotel_tiffin'],
@@ -368,6 +405,21 @@ const state = {
 
 function uid() { return 'e_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8); }
 function todayISO() { return new Date().toISOString().slice(0, 10); }
+// Normalizes any date-ish value to a plain 'YYYY-MM-DD' key. Expenses added locally
+// always have a clean date-only string, but rows synced down from the Google Sheet
+// can come back as a full ISO datetime (e.g. "2026-08-29T00:00:00.000Z") once Sheets
+// auto-converts the cell to its own Date type. Since the calendar date always sits in
+// the first 10 characters either way, comparisons must go through this instead of a
+// raw string match against e.date, or Sheet-synced rows silently fail to match.
+function dateKey(v) { return v == null ? '' : String(v).slice(0, 10); }
+// Builds a 'YYYY-MM-DD' string from a Date's own LOCAL calendar fields, never going
+// through toISOString(). toISOString() converts to UTC first, which silently shifts
+// the date backward by one day for any positive-UTC-offset timezone (e.g. India,
+// IST = UTC+5:30) whenever the Date's local time-of-day has been reset to midnight —
+// exactly what the day-range loops below do.
+function localYMD(d) {
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
 function fmtINR(n, decimals) {
   n = Number(n) || 0;
   const opts = { maximumFractionDigits: decimals === undefined ? 0 : decimals, minimumFractionDigits: 0 };
@@ -377,11 +429,12 @@ function daysInMonth(d) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).
 function startOfWeek(d) { const x = new Date(d); const day = x.getDay(); const diff = (day === 0 ? -6 : 1) - day; x.setDate(x.getDate() + diff); x.setHours(0,0,0,0); return x; }
 
 window.K = { CATEGORIES, getSub, getCatColor, getCatEmo, getSubLabel, getCatLabel, isFixedSub,
+  addCustomSub, restoreCustomSubs, listCustomSubs,
   suggestSubFromText, PAYMENT_MODES, INCOME_SOURCES, getIncomeSourceLabel, getIncomeSourceEmo,
   SAVING_TYPES, getSavingTypeLabel, getSavingTypeEmo, getSavingTypeColor,
   openDB, addExpense, deleteExpense, getAllExpenses,
   addIncome, deleteIncome, getAllIncome, addSaving, deleteSaving, getAllSavings,
-  setBudget, getAllBudgets, deleteBudget, setKV, getKV, state, uid, todayISO, fmtINR, daysInMonth, startOfWeek,
+  setBudget, getAllBudgets, deleteBudget, setKV, getKV, state, uid, todayISO, dateKey, localYMD, fmtINR, daysInMonth, startOfWeek,
   sync, onSyncChange, testConnection, fetchRemoteAll, flushQueue, updatePendingCount, scheduleFlush };
 
 })();
@@ -856,9 +909,9 @@ function drawHomeWeekChart() {
   const labels = [], data = [];
   for (let i = 6; i >= 0; i--) {
     const d = new Date(now); d.setDate(d.getDate() - i);
-    const dStr = d.toISOString().slice(0, 10);
+    const dStr = K.localYMD(d);
     labels.push(d.toLocaleDateString('en-IN', { weekday: 'short' }));
-    data.push(K.state.expenses.filter(e => e.date === dStr).reduce((s, e) => s + e.amount, 0));
+    data.push(K.state.expenses.filter(e => K.dateKey(e.date) === dStr).reduce((s, e) => s + e.amount, 0));
   }
   destroyChart('homeWeek');
   charts.homeWeek = new Chart(canvas.getContext('2d'), {
@@ -1060,7 +1113,7 @@ function renderHistoryList() {
 
   // group by date
   const groups = {};
-  items.forEach(e => { (groups[e.date] = groups[e.date] || []).push(e); });
+  items.forEach(e => { const dk = K.dateKey(e.date); (groups[dk] = groups[dk] || []).push(e); });
   const dateKeys = Object.keys(groups).sort((a, b) => new Date(b) - new Date(a));
 
   const todayStr = K.todayISO();
@@ -1461,9 +1514,9 @@ function drawDailyBarChart(rangeDays) {
   const labels = [], data = [];
   for (let i = 0; i < rangeDays; i++) {
     const d = new Date(from); d.setDate(d.getDate() + i);
-    const dStr = d.toISOString().slice(0, 10);
+    const dStr = K.localYMD(d);
     labels.push(rangeDays > 31 ? d.toLocaleDateString('en-IN', { day: 'numeric' }) : d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }));
-    data.push(K.state.expenses.filter(e => e.date === dStr).reduce((s, e) => s + e.amount, 0));
+    data.push(K.state.expenses.filter(e => K.dateKey(e.date) === dStr).reduce((s, e) => s + e.amount, 0));
   }
   destroyChart('dailyBar');
   const ctx = document.getElementById('dailyBarChart').getContext('2d');
@@ -1494,7 +1547,7 @@ function drawTrendChart(rangeDays) {
   for (let i = 0; i < dayCount; i++) {
     const d = new Date(from); d.setDate(d.getDate() + i);
     const dEnd = new Date(d); dEnd.setHours(23,59,59,999);
-    const dayTotal = K.state.expenses.filter(e => e.date === d.toISOString().slice(0,10)).reduce((s,e)=>s+e.amount,0);
+    const dayTotal = K.state.expenses.filter(e => K.dateKey(e.date) === K.localYMD(d)).reduce((s,e)=>s+e.amount,0);
     cumulative += dayTotal;
     labels.push(d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' }));
     actual.push(cumulative);
@@ -1793,7 +1846,26 @@ function renderExpenseFields() {
           <button class="cat-tile ${draft.subId === s.id ? 'selected' : ''}" data-sub="${s.id}">
             <span class="emo">${s.catEmo}</span><span>${s.label}</span>
           </button>`).join('')}
+        <button class="cat-tile" id="addCategoryTile" style="border-style:dashed;opacity:0.85;">
+          <span class="emo">➕</span><span>Add category</span>
+        </button>
       </div>
+      ${draft.addingCategory ? `
+      <div class="card" style="margin-top:10px;padding:12px 14px;">
+        <label style="display:block;margin-bottom:8px;">New category name</label>
+        <input id="newCatLabelField" class="text-input" type="text" placeholder="e.g. Pet Care, Gym Membership" value="${esc(draft.newCatLabel || '')}" />
+        <label style="display:block;margin:12px 0 8px;">Goes under</label>
+        <div class="cat-grid" id="newCatParentGrid">
+          ${K.CATEGORIES.map(c => `
+            <button class="cat-tile ${draft.newCatParent === c.id ? 'selected' : ''}" data-new-cat-parent="${c.id}">
+              <span class="emo">${c.emo}</span><span>${c.label}</span>
+            </button>`).join('')}
+        </div>
+        <div style="display:flex;gap:10px;margin-top:12px;">
+          <button class="tag-apply" id="confirmAddCategoryBtn" style="flex:1;">Add</button>
+          <button class="chip" id="cancelAddCategoryBtn" style="flex:1;">Cancel</button>
+        </div>
+      </div>` : ''}
     </div>
     <div class="field">
       <label>Merchant / Payee</label>
@@ -1925,6 +1997,30 @@ function sheet_wireExpenseFields() {
   sheet.querySelectorAll('[data-sub]').forEach(b => b.onclick = () => { draft.subId = b.dataset.sub; renderAddSheet(); });
   const suggestBtn = document.getElementById('applySuggestBtn');
   if (suggestBtn) suggestBtn.onclick = () => { draft.subId = K.suggestSubFromText(draft.merchant); renderAddSheet(); };
+
+  const addCategoryTile = document.getElementById('addCategoryTile');
+  if (addCategoryTile) addCategoryTile.onclick = () => { draft.addingCategory = true; renderAddSheet(); };
+  const newCatLabelField = document.getElementById('newCatLabelField');
+  if (newCatLabelField) { newCatLabelField.oninput = () => { draft.newCatLabel = newCatLabelField.value; }; newCatLabelField.focus(); }
+  sheet.querySelectorAll('[data-new-cat-parent]').forEach(b => b.onclick = () => { draft.newCatParent = b.dataset.newCatParent; renderAddSheet(); });
+  const confirmAddCategoryBtn = document.getElementById('confirmAddCategoryBtn');
+  if (confirmAddCategoryBtn) confirmAddCategoryBtn.onclick = () => {
+    const label = (draft.newCatLabel || '').trim();
+    if (!label) { toast('Enter a name for the category'); return; }
+    if (!draft.newCatParent) { toast('Pick which group it goes under'); return; }
+    const newId = K.addCustomSub(draft.newCatParent, label);
+    if (!newId) { toast('Could not add that category'); return; }
+    K.setKV('customCategories', K.listCustomSubs());
+    draft.subId = newId;
+    draft.addingCategory = false; draft.newCatLabel = ''; draft.newCatParent = null;
+    renderAddSheet();
+    toast('Category added');
+  };
+  const cancelAddCategoryBtn = document.getElementById('cancelAddCategoryBtn');
+  if (cancelAddCategoryBtn) cancelAddCategoryBtn.onclick = () => {
+    draft.addingCategory = false; draft.newCatLabel = ''; draft.newCatParent = null;
+    renderAddSheet();
+  };
 
   const merchantEl = document.getElementById('merchantField');
   merchantEl.oninput = () => { draft.merchant = merchantEl.value; };
@@ -2380,14 +2476,15 @@ function init() {
 
   K.openDB().then(() => Promise.all([
     K.getAllExpenses(), K.getAllBudgets(), K.getKV('theme', 'dark'), K.getKV('gasUrl', null), K.updatePendingCount(),
-    K.getAllIncome(), K.getAllSavings(),
-  ])).then(([expenses, budgets, theme, gasUrl, _pending, income, savings]) => {
+    K.getAllIncome(), K.getAllSavings(), K.getKV('customCategories', []),
+  ])).then(([expenses, budgets, theme, gasUrl, _pending, income, savings, customCategories]) => {
     K.state.expenses = expenses;
     K.state.income = income;
     K.state.savings = savings;
     K.state.budgets = {}; budgets.forEach(b => { K.state.budgets[b.subId] = b.amount; });
     K.state.theme = theme;
     K.sync.gasUrl = gasUrl;
+    K.restoreCustomSubs(customCategories);
     window.applyTheme();
     switchView('home');
 
